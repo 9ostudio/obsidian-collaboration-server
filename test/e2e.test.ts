@@ -7,7 +7,7 @@ import { Cipher, INVITE_PURPOSE, exportPublicKey, fromB64, fromB64Url, fromUtf8,
 import { SyncEngine, type VaultIO } from '@plugin/core/engine'
 import { buildVersions } from '@plugin/core/history'
 import { LinkMirror, type ExternalFS } from '@plugin/core/mirror'
-import { ShareSession } from '@plugin/core/share'
+import { ShareSession, openSharedKey } from '@plugin/core/share'
 import { MemoryStore } from '@plugin/core/store'
 
 Object.assign(globalThis, { window: globalThis })
@@ -190,6 +190,12 @@ async function makeClient (name: string): Promise<Client> {
   const c = { name, base: BASE, userId, secret, keys, vault: new MemoryVault(), stores: new Map(), codes: [], open: new Set(), denied: [], conflicts: [], rootMissing: 0 } as unknown as Client
   c.api = new Api(fetchHttp, () => c.base, () => `${userId}.${secret}`, (location) => { c.base = location; c.session?.reconnect() })
   await c.api.register(userId, secret, await exportPublicKey(keys.publicKey))
+  return c
+}
+
+async function sameIdentity (src: Client, name: string): Promise<Client> {
+  const c = { name, base: src.base, userId: src.userId, secret: src.secret, keys: src.keys, vault: new MemoryVault(), stores: new Map(), codes: [], open: new Set(), denied: [], conflicts: [], rootMissing: 0 } as unknown as Client
+  c.api = new Api(fetchHttp, () => c.base, () => `${c.userId}.${c.secret}`, (location) => { c.base = location; c.session?.reconnect() })
   return c
 }
 
@@ -605,6 +611,28 @@ async function main (): Promise<void> {
     try { await D.session!.cipher.decrypt(`${shareId}:${latest.f}:content`, fromB64(latest.d!)) } catch { dCanRead = false }
     check('removed member cannot decrypt new changes', !dCanRead)
     await stop(D)
+
+    console.log('your other devices')
+    const laptop = await sameIdentity(A, 'alice-laptop')
+    const desk = await sameIdentity(A, 'alice-desk')
+    laptop.vault.userWrite('Desk/plan.md', 'plan\n')
+    const deskShare = await createShare(laptop, 'Desk', 'Alice')
+    await start(laptop, deskShare.id, 'Desk', deskShare.keyring)
+    await settle(laptop)
+    check('a new share has no key copy for your other devices yet', await openSharedKey(desk.api, deskShare.id, desk.keys.privateKey) === null)
+    await laptop.session!.keepKeyForSelf(await exportPublicKey(laptop.keys.publicKey))
+    const listed = (await desk.api.listShares()).find((s) => s.id === deskShare.id)
+    const deskRing = await openSharedKey(desk.api, deskShare.id, desk.keys.privateKey)
+    check('your other device sees the share and can open its key', listed?.role === 'owner' && deskRing !== null)
+    await start(desk, deskShare.id, 'Desk', deskRing!)
+    check('your other device gets the folder', await until(() => desk.vault.text('Desk/plan.md') === 'plan\n'))
+    desk.vault.userWrite('Desk/plan.md', 'plan\nfrom the desk\n')
+    check('both devices edit the same folder', await until(() => laptop.vault.text('Desk/plan.md') === 'plan\nfrom the desk\n'))
+    check('a stale key copy is refused', await status(() => laptop.api.putKeyEnvelope(shareId, 0, 'x'.repeat(40))) === 400)
+    check('only people in the share can store a key copy', await status(() => B.api.putKeyEnvelope(deskShare.id, 0, 'x'.repeat(40))) === 404)
+    await stop(desk)
+    await stop(laptop)
+    await A.api.deleteShare(deskShare.id)
 
     console.log('restart after offline edits')
     await settle(A, B, C)

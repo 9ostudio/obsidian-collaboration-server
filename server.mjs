@@ -552,6 +552,15 @@ async function handleApi (req, res, url, parts) {
     return json(res, 200, { epoch: share.epoch, envelope: share.envelopes?.[user.id] || null })
   }
 
+  if (sub === 'key' && method === 'PUT') {
+    if (!owner && !canRead(share, user.id)) return json(res, 403, { error: 'forbidden' })
+    const { epoch, data } = await readJson(req)
+    if (epoch !== share.epoch || !isString(data, 16384)) return json(res, 400, { error: 'bad_epoch' })
+    share.envelopes = { ...(share.envelopes || {}), [user.id]: { epoch, data } }
+    saveDb()
+    return json(res, 200, { ok: true })
+  }
+
   if (sub === 'blobs' && parts[4]) {
     const blobId = parts[4]
     if (!ID.test(blobId)) return json(res, 400, { error: 'bad_blob' })
